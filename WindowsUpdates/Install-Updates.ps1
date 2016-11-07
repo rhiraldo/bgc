@@ -1,5 +1,5 @@
-﻿#$Servers = Get-DBMSServers -envsels pilot01 -typesels app
-$Servers = "TOR01L1BBCON01","TOR01L1BBCON02"
+﻿$Servers = Get-DBMSServers -envsels tor01l1 -typesels upl,ind
+#$Servers = "TOR01L1BBCON01","TOR01L1BBCON02"
 $StartTime = Get-Date
 Invoke-Command -ComputerName $Servers -ScriptBlock{
 #Define update criteria.
@@ -67,17 +67,27 @@ Else
     $Searcher = New-Object -ComObject Microsoft.Update.Searcher
     $SearchResult = $Searcher.Search($Criteria).Updates
 
-    if(($SearchResult).Count -eq 0)
+    if(((schtasks /query /tn windows-updates /fo LIST /v) -match "Ready") -and $($SearchResult).Count -eq 0)
     {
-        schtasks /delete /TN "Windows-Updates" /F 
+        $AutoUpdate = New-Object -ComObject Microsoft.Update.AutoUpdate
+        $AutoUpdate.DetectNow()
+        schtasks /delete /TN "Windows-Updates" /F
+        shutdown.exe /t 0 /r
     }
 }
 
 '@
-$Script | Out-File C:\temp\Windows-Updates.ps1 -Force
+$ScriptPath = "C:\Temp"
+if(!(Test-Path $ScriptPath))
+{
+    New-Item -Path $ScriptPath -ItemType Directory -Force | Out-Null
+}
+$Script | Out-File $ScriptPath\Windows-Updates.ps1 -Force
 $ExecutionTime = (Get-Date).AddMinutes(1).ToString("HH:mm")
-schtasks /create /TN "Windows-Updates" /SC "ONCE" /TR "powershell.exe -file C:\Temp\Windows-Updates.ps1" /IT /F /RU "NT AUTHORITY\SYSTEM" /ST $ExecutionTime
-
+If((schtasks /query /tn windows-updates /fo LIST /v) -notmatch "Running")
+{
+    schtasks /create /TN "Windows-Updates" /SC "ONCE" /TR "powershell.exe -file C:\Temp\Windows-Updates.ps1" /IT /F /RU "NT AUTHORITY\SYSTEM" /ST $ExecutionTime
+}
 }
 
 $FullReport = @()
@@ -92,66 +102,71 @@ Do
         If(!(Test-Connection $Computer -Count 1 -ErrorAction SilentlyContinue)) {$Unreachable += $Computer}
     }
     $PendingComputers = $PendingComputers | ?{$Unreachable -notcontains $_}
-
-	$Report = Invoke-Command -ComputerName $PendingComputers -ScriptBlock{
+    if($PendingComputers -ne $null)
+    {
+	    $Report = Invoke-Command -ComputerName $PendingComputers -ScriptBlock{
 		
-            $Session = New-Object -ComObject "Microsoft.Update.Session"
-            $Searcher = $Session.CreateUpdateSearcher()
+                $Session = New-Object -ComObject "Microsoft.Update.Session"
+                $Searcher = $Session.CreateUpdateSearcher()
 
-            $historyCount = $Searcher.GetTotalHistoryCount()
+                $historyCount = $Searcher.GetTotalHistoryCount()
 
-            $Allhistory = $Searcher.QueryHistory(0, $historyCount) | Select-Object Title,  Date,@{name="Status";expression={switch($_.ResultCode){2{"Successful"};4{"Failed"}}}},
+                $Allhistory = $Searcher.QueryHistory(0, $historyCount) | Select-Object Title,  Date,@{name="Status";expression={switch($_.ResultCode){2{"Successful"};4{"Failed"}}}},
 
-                @{name="Operation"; expression={switch($_.operation){
+                    @{name="Operation"; expression={switch($_.operation){
 
-                    1 {"Installation"}; 2 {"Uninstallation"}; 3 {"Other"}        
-            }}}
-            $Allhistory = $Allhistory | ?{$_.Date -ge (Get-date).AddDays(-5)}
-            $LogPath = "C:\Temp\Log\Windows-Updates"
-            if(!(Test-Path $LogPath))
-            {
-                New-Item -Path $LogPath -ItemType Directory -Force | Out-Null
-            }
-            if($Allhistory -ne $null)
-            {
-                $Allhistory | Export-Csv "C:\Temp\Log\Windows-Updates\$($Env:COMPUTERNAME)-$(Get-Date -Format 'yyyy-MM-dd').csv" -NoTypeInformation -Force
-            }
-            else
-            {
-                $Allhistory = New-Object -TypeName PSObject -Property @{
-                    Operation= ''
-                    Title = ''
-                    Status = ''
-                    Date = (Get-Date)
+                        1 {"Installation"}; 2 {"Uninstallation"}; 3 {"Other"}        
+                }}}
+                $Allhistory = $Allhistory | ?{$_.Date -ge (Get-date).AddDays(-5)}
+                $LogPath = "C:\Temp\Log\Windows-Updates"
+                if(!(Test-Path $LogPath))
+                {
+                    New-Item -Path $LogPath -ItemType Directory -Force | Out-Null
                 }
-            }
+                if($Allhistory -ne $null)
+                {
+                    $Allhistory | Export-Csv "C:\Temp\Log\Windows-Updates\$($Env:COMPUTERNAME)-$(Get-Date -Format 'yyyy-MM-dd').csv" -NoTypeInformation -Force
+                }
+                else
+                {
+                    $Allhistory = New-Object -TypeName PSObject -Property @{
+                        Operation= ''
+                        Title = ''
+                        Status = ''
+                        Date = (Get-Date)
+                    }
+                }
             
-            $Criteria = "IsInstalled=0 and Type='Software' or (DeploymentAction='Uninstallation' and IsInstalled=1)"
-            $Searcher = New-Object -ComObject Microsoft.Update.Searcher
-            $SearchResult = $Searcher.Search($Criteria).Updates
-            $LastReboot = (Get-WinEvent -FilterHashtable @{logname=’System’; id=1074} -MaxEvents 1).TimeCreated
-            $Obj = New-Object -TypeName PSObject -Property @{
-			Pending = $SearchResult.Count
-			Installed = $Allhistory.Count
-            Rebooted = if($LastReboot -gt $Allhistory[0].Date){"Yes"}Else{"No"}
-            LastRebootTime = $LastReboot
-		}
-		return $Obj
-	}
-    $FullReport += $Report
-    $FullReport = $FullReport |Sort-Object Installed, PSComputerName | Select PSComputerName,Pending,Installed,Rebooted,LastRebootTime -Unique
-    [System.Array]$PendingComputers += $Unreachable
-
+                $Criteria = "IsInstalled=0 and Type='Software' or (DeploymentAction='Uninstallation' and IsInstalled=1)"
+                $Searcher = New-Object -ComObject Microsoft.Update.Searcher
+                $SearchResult = $Searcher.Search($Criteria).Updates
+                $LastReboot = (Get-WinEvent -FilterHashtable @{logname=’System’; id=1074} -MaxEvents 1).TimeCreated
+                $Obj = New-Object -TypeName PSObject -Property @{
+			    Pending = $SearchResult.Count
+			    Installed = $Allhistory.Count
+                Rebooted = if($LastReboot.ToUniversalTime() -gt $Allhistory[0].Date){"Yes"}Else{"No"}
+                LastRebootTime = $LastReboot
+		    }
+		    return $Obj            
+	    }
+        $FullReport += @($Report)
+    }
+    $FullReport = ($FullReport | Where {$_.PSComputerName -notcontains $Report.PSComputerName}) + $Report |Sort-Object Installed, PSComputerName | Select PSComputerName,Pending,Installed,Rebooted,LastRebootTime -Unique
+    #$FullReport = $FullReport |Sort-Object Installed, PSComputerName | Select PSComputerName,Pending,Installed,Rebooted,LastRebootTime -Unique
+    $NeedReboot = @($FullReport | ?{$_.Rebooted -eq "No"})
     clear
     Write-Host "******************************************************************" -ForegroundColor Cyan
     Write-Host "******************** WINDOWS UPDATES REPORT **********************" -ForegroundColor Cyan
     Write-Host "******************************************************************" -ForegroundColor Cyan
-    $FullReport | ft -AutoSize #| Out-GridView
+    $FullReport | ft -AutoSize 
     Write-Host "******************************************************************" -ForegroundColor Cyan
-    if($Unreachable -ne $null)
+    If($Unreachable -ne $null)
     {
         Write-Host "Unreachable systems: $unreachable" -ForegroundColor Yellow
+        [System.Array]$PendingComputers += $Unreachable
     }
-    sleep 3
 
-} while ($PendingComputers.Count -gt 0)
+
+    sleep -Seconds 30
+
+} while ($PendingComputers.Count -gt 0 -and $NeedReboot.Count -gt 0)
