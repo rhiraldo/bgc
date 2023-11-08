@@ -28,7 +28,15 @@ $chart.ChartAreas.Add($chartArea)
 # Create a series
 $series = New-Object Windows.Forms.DataVisualization.Charting.Series
 $series.Name = "Data"
-$series.Points.DataBindXY($data | ForEach-Object { $_.month }, $data | ForEach-Object { [double]$_.value })
+
+# Add data points to the series
+$data | ForEach-Object {
+    $point = New-Object DataPoint
+    $point.AxisLabel = $_.month
+    $point.YValues = @([double]$_.value)
+    $series.Points.Add($point)
+}
+
 $chart.Series.Add($series)
 
 # Create X and Y axis labels
